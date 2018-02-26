@@ -3,16 +3,12 @@
 from __future__ import unicode_literals, division
 
 import logging
-import math
 import os
 import shutil
 import subprocess
 
-from monty.os.path import which
 from monty.serialization import dumpfn, loadfn
 from monty.shutil import decompress_dir
-from pymatgen import Structure
-from pymatgen.io.vasp import VaspInput, Incar, Outcar, Kpoints
 
 from custodian.custodian import Job
 from custodian.utils import backup
@@ -51,8 +47,7 @@ class ElkJob(Job):
 
     def __init__(self, vasp_cmd, output_file="vasp.out",
                  stderr_file="std_err.txt", suffix="", final=True, backup=True,
-                 auto_npar=True, auto_gamma=True, settings_override=None,
-                 gamma_vasp_cmd=None, copy_magmom=False, auto_continue=False):
+                 settings_override=None, auto_continue=False):
         """
         This constructor is necessarily complex due to the need for
         flexibility. For standard kinds of runs, it's often better to use one
@@ -74,17 +69,6 @@ class ElkJob(Job):
             backup (bool): Whether to backup the initial input files. If True,
                 the INCAR, KPOINTS, POSCAR and POTCAR will be copied with a
                 ".orig" appended. Defaults to True.
-            auto_npar (bool): Whether to automatically tune NPAR to be sqrt(
-                number of cores) as recommended by VASP for DFT calculations.
-                Generally, this results in significant speedups. Defaults to
-                True. Set to False for HF, GW and RPA calculations.
-            auto_gamma (bool): Whether to automatically check if run is a
-                Gamma 1x1x1 run, and whether a Gamma optimized version of
-                VASP exists with ".gamma" appended to the name of the VASP
-                executable (typical setup in many systems). If so, run the
-                gamma optimized version of VASP instead of regular VASP. You
-                can also specify the gamma vasp command using the
-                gamma_vasp_cmd argument if the command is named differently.
             settings_override ([dict]): An ansible style list of dict to
                 override changes. For example, to set ISTART=1 for subsequent
                 runs and to copy the CONTCAR to the POSCAR, you will provide::
@@ -92,14 +76,6 @@ class ElkJob(Job):
                     [{"dict": "INCAR", "action": {"_set": {"ISTART": 1}}},
                      {"file": "CONTCAR",
                       "action": {"_file_copy": {"dest": "POSCAR"}}}]
-            gamma_vasp_cmd (str): Command for gamma vasp version when
-                auto_gamma is True. Should follow the list style of
-                subprocess. Defaults to None, which means ".gamma" is added
-                to the last argument of the standard vasp_cmd.
-            copy_magmom (bool): Whether to copy the final magmom from the
-                OUTCAR to the next INCAR. Useful for multi-relaxation runs
-                where the CHGCAR and WAVECAR are sometimes deleted (due to
-                changes in fft grid, etc.). Only applies to non-final runs.
             auto_continue (bool): Whether to automatically continue a run
                 if a STOPCAR is present. This is very usefull if using the
                 wall-time handler which will write a read-only STOPCAR to
@@ -112,10 +88,6 @@ class ElkJob(Job):
         self.backup = backup
         self.suffix = suffix
         self.settings_override = settings_override
-        self.auto_npar = auto_npar
-        self.auto_gamma = auto_gamma
-        self.gamma_vasp_cmd = gamma_vasp_cmd
-        self.copy_magmom = copy_magmom
         self.auto_continue = auto_continue
 
     def setup(self):
@@ -128,32 +100,6 @@ class ElkJob(Job):
         if self.backup:
             for f in ELK_INPUT_FILES:
                 shutil.copy(f, "{}.orig".format(f))
-
-        if self.auto_npar:
-            try:
-                incar = Incar.from_file("INCAR")
-                # Only optimized NPAR for non-HF and non-RPA calculations.
-                if not (incar.get("LHFCALC") or incar.get("LRPA")
-                        or incar.get("LEPSILON")):
-                    if incar.get("IBRION") in [5, 6, 7, 8]:
-                        # NPAR should not be set for Hessian matrix
-                        # calculations, whether in DFPT or otherwise.
-                        del incar["NPAR"]
-                    else:
-                        import multiprocessing
-                        # try sge environment variable first
-                        # (since multiprocessing counts cores on the current
-                        # machine only)
-                        ncores = os.environ.get('NSLOTS') or \
-                            multiprocessing.cpu_count()
-                        ncores = int(ncores)
-                        for npar in range(int(math.sqrt(ncores)), ncores):
-                            if ncores % npar == 0:
-                                incar["NPAR"] = npar
-                                break
-                    incar.write_file("INCAR")
-            except:
-                pass
 
         if self.auto_continue:
             if os.path.exists("continue.json"):
@@ -191,22 +137,12 @@ class ElkJob(Job):
 
     def run(self):
         """
-        Perform the actual VASP run.
+        Perform the actual ELK run.
 
         Returns:
             (subprocess.Popen) Used for monitoring.
         """
         cmd = list(self.vasp_cmd)
-        if self.auto_gamma:
-            vi = VaspInput.from_directory(".")
-            kpts = vi["KPOINTS"]
-            if kpts.style == Kpoints.supported_modes.Gamma \
-                    and tuple(kpts.kpts[0]) == (1, 1, 1):
-                if self.gamma_vasp_cmd is not None and which(
-                        self.gamma_vasp_cmd[-1]):
-                    cmd = self.gamma_vasp_cmd
-                elif which(cmd[-1] + ".gamma"):
-                    cmd[-1] += ".gamma"
         logger.info("Running {}".format(" ".join(cmd)))
         with open(self.output_file, 'w') as f_std, \
                 open(self.stderr_file, "w", buffering=1) as f_err:
@@ -226,53 +162,7 @@ class ElkJob(Job):
                 elif self.suffix != "":
                     shutil.copy(f, "{}{}".format(f, self.suffix))
 
-        if self.copy_magmom and not self.final:
-            try:
-                outcar = Outcar("OUTCAR")
-                magmom = [m['tot'] for m in outcar.magnetization]
-                incar = Incar.from_file("INCAR")
-                incar['MAGMOM'] = magmom
-                incar.write_file("INCAR")
-            except:
-                logger.error('MAGMOM copy from OUTCAR to INCAR failed')
-
         # Remove continuation so if a subsequent job is run in
         # the same directory, will not restart this job.
         if os.path.exists("continue.json"):
             os.remove("continue.json")
-
-
-class GenerateVaspInputJob(Job):
-
-    def __init__(self, input_set, contcar_only=True, **kwargs):
-        """
-        Generates a VASP input based on an existing directory. This is typically
-        used to modify the VASP input files before the next VaspJob.
-
-        Args:
-            input_set (str): Full path to the input set. E.g.,
-                "pymatgen.io.vasp.sets.MPNonSCFSet".
-            contcar_only (bool): If True (default), only CONTCAR structures
-                are used as input to the input set.
-        """
-        self.input_set = input_set
-        self.contcar_only = contcar_only
-        self.kwargs = kwargs
-
-    def setup(self):
-        pass
-
-    def run(self):
-        if os.path.exists("CONTCAR"):
-            structure = Structure.from_file("CONTCAR")
-        elif (not self.contcar_only) and os.path.exists("POSCAR"):
-            structure = Structure.from_file("POSCAR")
-        else:
-            raise RuntimeError("No CONTCAR/POSCAR detected to generate input!")
-        modname, classname = self.input_set.rsplit(".", 1)
-        mod = __import__(modname, globals(), locals(), [classname], 0)
-        vis = getattr(mod, classname)(structure, **self.kwargs)
-        vis.write_input(".")
-
-    def postprocess(self):
-        pass
