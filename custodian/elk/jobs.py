@@ -32,7 +32,7 @@ ELK_OUTPUT_FILES = [
     'INFO.OUT', 'KPOINTS.OUT', 'EIGVAL.OUT', 'DTOTENERGY.OUT', 'EFERMI.OUT',
     'EQATOMS.OUT', 'EVALCORE.OUT', 'FERMIDOS.OUT', 'GAP.OUT', 'GEOMETRY.OUT',
     'IADIST.OUT', 'LATTICE.OUT', 'LINENGY.OUT', 'MOMENT.OUT', 'MOMENTM.OUT',
-    'OCCSV.OUT', 'RMSDVS.OUT', 'STATE.OUT' 'SYMCRYS.OUT', 'SYMLAT.OUT',
+    'OCCSV.OUT', 'RMSDVS.OUT', 'STATE.OUT', 'SYMCRYS.OUT', 'SYMLAT.OUT',
     'SYMSITE.OUT', 'TOTENERGY.OUT'
 ]
 
@@ -44,7 +44,8 @@ class ElkJob(Job):
     """
 
     def __init__(self, elk_cmd, output_file="ELK_OUT.txt",
-                 stderr_file="ELK_ERR.txt", suffix="", final=True, backup=True):
+                 stderr_file="ELK_ERR.txt", suffix="", final=True, backup=True,
+                 rm_temp_binaries=False):
         """
         This constructor is necessarily complex due to the need for
         flexibility. For standard kinds of runs, it's often better to use one
@@ -73,6 +74,7 @@ class ElkJob(Job):
         self.final = final
         self.backup = backup
         self.suffix = suffix
+        self.rm_temp_binaries = rm_temp_binaries
 
     def setup(self):
         """
@@ -110,6 +112,20 @@ class ElkJob(Job):
                     shutil.move(f, "{}{}".format(f, self.suffix))
                 elif self.suffix != "":
                     shutil.copy(f, "{}{}".format(f, self.suffix))
+
+        # Remove temporary ELK binaries after run is completed.
+        if self.rm_temp_binaries:
+            if os.path.exists("EVALFV.OUT"):
+                os.remove("EVALFV.OUT")
+
+            if os.path.exists("EVALSV.OUT"):
+                os.remove("EVALSV.OUT")
+
+            if os.path.exists("EVECFV.OUT"):
+                os.remove("EVECFV.OUT")
+
+            if os.path.exists("EVECSV.OUT"):
+                os.remove("EVECSV.OUT")
 
         # Remove continuation so if a subsequent job is run in
         # the same directory, will not restart this job.
